@@ -5,26 +5,26 @@ from moonlander_env import MoonLanderEnv
 # Load the trained model
 model = PPO.load("moonlander_ai")
 
-# Create the environment
-env = DummyVecEnv([lambda: MoonLanderEnv()])  # Wrap for compatibility
+# Create the test environment with rendering enabled
+def make_test_env():
+    return MoonLanderEnv(render_mode="human")  # Enable rendering
+
+env = DummyVecEnv([make_test_env])  # Wrap for compatibility
 
 # If training used VecNormalize, load normalization parameters
 env = VecNormalize.load("moonlander_ai_norm.pkl", env)
 env.training = False  # Disable training mode (keeps rewards true)
 env.norm_reward = False  # Use raw rewards during testing
 
-# Enable rendering on the first environment inside the VecEnv
-env.get_attr("enable_rendering")[0]()  # Correct way to call enable_rendering()
-
 # Test the model for a fixed number of episodes
 num_episodes = 5
 for episode in range(num_episodes):
-    obs = env.reset()
+    obs = env.reset()  # No need to unpack with an underscore here
     done = False
     while not done:
         action, _ = model.predict(obs, deterministic=True)  # Deterministic for consistency
-        obs, _, done, _ = env.step(action)
-        env.render()  # Use render() directly (No need for get_attr here)
+        obs, rewards, dones, infos = env.step(action)  # Correctly unpacking four values
+        done = dones[0]  # Extract first environment's done flag
 
 # Close the environment
 env.close()
