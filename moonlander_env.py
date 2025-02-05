@@ -30,10 +30,11 @@ class MoonLanderEnv(gym.Env):
         self.pad_y = self.HEIGHT - 50
 
         # Define action and observation space
-        self.action_space = spaces.Discrete(4)  # 0: no action, 1: left, 2: right, 3: thrust
+        self.action_space = spaces.Discrete(6)  # 0: no action, 1: left, 2: right, 3: weak thrust, 4: medium thrust, 5: strong thrust
+
         self.observation_space = spaces.Box(
-            low=np.array([0, 0, -10, -10, -180, 0, 0]),  # Min values for state
-            high=np.array([self.WIDTH, self.HEIGHT, 10, 10, 180, self.WIDTH, self.HEIGHT]),  # Max values for state
+            low=np.array([0, 0, -10, -10, -180, 0, 0], dtype=np.float32),  # Explicitly cast to float32
+            high=np.array([self.WIDTH, self.HEIGHT, 10, 10, 180, self.WIDTH, self.HEIGHT], dtype=np.float32),  # Explicitly cast to float32
             dtype=np.float32
         )
 
@@ -42,7 +43,22 @@ class MoonLanderEnv(gym.Env):
         self.screen = pygame.display.set_mode((self.WIDTH, self.HEIGHT))
         pygame.display.set_caption("Moonlander Game")
 
+        # Rendering control
+        self.rendering_enabled = False
+
+    def enable_rendering(self):
+        """Enable rendering."""
+        self.rendering_enabled = True
+
+    def disable_rendering(self):
+        """Disable rendering."""
+        self.rendering_enabled = False
+
     def reset(self):
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+
         # Reset lander state
         self.lander_x = self.WIDTH // 2 - self.lander_width // 2
         self.lander_y = 50
@@ -54,19 +70,22 @@ class MoonLanderEnv(gym.Env):
         self.pad_x = random.randint(0, self.WIDTH - self.pad_width)
         self.pad_y = self.HEIGHT - 50
 
-        # Return initial observation
         return self._get_obs()
 
+
     def step(self, action):
+        pygame.event.pump()
+
         # Apply action
         if action == 1:  # Rotate left
             self.angle += self.rotation_speed
         elif action == 2:  # Rotate right
             self.angle -= self.rotation_speed
-        elif action == 3:  # Apply thrust
+        elif action in [3, 4, 5]:  # Apply thrust
             radians = math.radians(self.angle)
-            self.lander_vel_x += self.thrust * math.sin(radians)
-            self.lander_vel_y -= self.thrust * math.cos(radians)
+            thrust_force = (action - 2) * 0.1  # 0.1 (weak) to 0.3 (strong)
+            self.lander_vel_x += thrust_force * math.sin(radians)
+            self.lander_vel_y -= thrust_force * math.cos(radians)
 
         # Apply gravity and damping
         self.lander_vel_y += self.gravity
@@ -77,48 +96,65 @@ class MoonLanderEnv(gym.Env):
         self.lander_x += self.lander_vel_x
         self.lander_y += self.lander_vel_y
 
-        # Get observation
         obs = self._get_obs()
-
-        # Calculate reward
         reward, done = self._calculate_reward()
 
         return obs, reward, done, {}
 
+
     def _get_obs(self):
-        # Return the current state as an observation
-        return np.array([
-            self.lander_x, self.lander_y,  # Lander position
-            self.lander_vel_x, self.lander_vel_y,  # Lander velocity
-            self.angle,  # Lander angle
-            self.pad_x, self.pad_y  # Landing pad position
-        ])
+        norm_x = self.lander_x / self.WIDTH
+        norm_y = self.lander_y / self.HEIGHT
+        norm_vx = self.lander_vel_x / 10  # Assume max velocity ~10
+        norm_vy = self.lander_vel_y / 10
+        norm_angle = self.angle / 180  # Normalize between -1 and 1
+        norm_pad_x = self.pad_x / self.WIDTH
+        norm_pad_y = self.pad_y / self.HEIGHT
+
+        return np.array([norm_x, norm_y, norm_vx, norm_vy, norm_angle, norm_pad_x, norm_pad_y], dtype=np.float32)
+
 
     def _calculate_reward(self):
-        # Check for landing
+        # Calculate distance to landing pad center
+        pad_center_x = self.pad_x + self.pad_width / 2
+        pad_center_y = self.pad_y
+        lander_center_x = self.lander_x + self.lander_width / 2
+        lander_center_y = self.lander_y + self.lander_height / 2
+
+        distance = math.sqrt((lander_center_x - pad_center_x) ** 2 + (lander_center_y - pad_center_y) ** 2)
+        distance_reward = -0.01 * distance  # Small penalty for being far
+
+        # Reward for reducing velocity
+        speed_penalty = -0.1 * (abs(self.lander_vel_x) + abs(self.lander_vel_y))
+
+        # Angle penalty (to keep the lander upright)
+        angle_penalty = -0.5 * abs(self.angle) if abs(self.angle) > 15 else 0
+
+        # Successful landing reward
         if (self.lander_x + self.lander_width >= self.pad_x and
             self.lander_x <= self.pad_x + self.pad_width and
             self.lander_y + self.lander_height >= self.pad_y):
             if abs(self.lander_vel_x) < 2 and abs(self.lander_vel_y) < 2 and abs(self.angle) < 15:
-                return 100, True  # Successful landing
+                return 100 + distance_reward + speed_penalty + angle_penalty, True  # Successful landing
             else:
                 return -100, True  # Crash
 
         # Check for out of bounds
-        if (self.lander_y > self.HEIGHT or
-            self.lander_x < 0 or
-            self.lander_x + self.lander_width > self.WIDTH):
+        if (self.lander_y > self.HEIGHT or self.lander_x < 0 or self.lander_x + self.lander_width > self.WIDTH):
             return -100, True  # Out of bounds
 
-        # Small negative reward for each step to encourage faster landings
-        return -0.1, False
+        return distance_reward + speed_penalty + angle_penalty, False
+
 
     def render(self, mode='human'):
-        # Render the game
+        if not self.rendering_enabled:
+            return
+
         self.screen.fill((0, 0, 0))
         pygame.draw.rect(self.screen, (0, 255, 0), (self.pad_x, self.pad_y, self.pad_width, self.pad_height))
         self._draw_lander()
         pygame.display.flip()
+
 
     def _draw_lander(self):
         # Draw the lander
